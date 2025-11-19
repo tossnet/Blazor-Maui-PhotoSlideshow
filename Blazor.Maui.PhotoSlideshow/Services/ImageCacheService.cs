@@ -1,6 +1,7 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 using System.Collections.Concurrent;
+using System.Text.Json;
 
 namespace Blazor.Maui.PhotoSlideshow.Services;
 
@@ -8,13 +9,18 @@ public class ImageCacheService
 {
     private const string NetworkFolderKey = "NetworkFolderPath";
     private const string DefaultNetworkFolder = "";
+    private const string ImageListCacheFile = "image_list_cache.json";
 
-    private readonly string _cacheFolder;
+    private readonly string _thumbnailsFolder;
+    private readonly string _imageListCachePath;
     private readonly SemaphoreSlim _cacheLock = new(10, 10);
+    private readonly ThumbnailService _thumbnailService;
     private Task<List<string>>? _imageLoadingTask;
     private readonly ConcurrentBag<string> _discoveredImages = new();
+    private FileSystemWatcher? _folderWatcher;
 
     public event Action<int>? OnImagesDiscovered;
+    public event Action<string>? OnNewImageDetected;
 
     public string NetworkFolder
     {
@@ -22,53 +28,73 @@ public class ImageCacheService
         set
         {
             Preferences.Default.Set(NetworkFolderKey, value);
-            // Réinitialiser le chargement si le chemin change
             _imageLoadingTask = null;
             _discoveredImages.Clear();
+            DeleteImageListCache();
+            StopFolderWatcher();
         }
     }
 
     public bool IsNetworkFolderConfigured => !string.IsNullOrWhiteSpace(NetworkFolder);
 
-    public ImageCacheService()
+    public ImageCacheService(ThumbnailService thumbnailService)
     {
-        _cacheFolder = Path.Combine(FileSystem.CacheDirectory, "images");
-        Directory.CreateDirectory(_cacheFolder);
+        _thumbnailService = thumbnailService;
+        _thumbnailsFolder = Path.Combine(FileSystem.CacheDirectory, "thumbnails");
+        _imageListCachePath = Path.Combine(FileSystem.CacheDirectory, ImageListCacheFile);
+
+        Directory.CreateDirectory(_thumbnailsFolder);
     }
 
-    public async Task<string?> GetCachedImagePathAsync(string networkPath)
+    /// <summary>
+    /// Récupère le chemin de la miniature (pour mosaïque)
+    /// </summary>
+    public async Task<string?> GetThumbnailPathAsync(string networkPath)
     {
-        var cacheFileName = GetCacheFileName(networkPath);
-        var cachePath = Path.Combine(_cacheFolder, cacheFileName);
+        var cacheFileName = GetCacheFileName(networkPath, "_thumb");
+        var thumbnailPath = Path.Combine(_thumbnailsFolder, cacheFileName);
 
-        if (File.Exists(cachePath))
+        if (File.Exists(thumbnailPath))
+            return thumbnailPath;
+
+        return await CreateThumbnailFromNetworkAsync(networkPath, thumbnailPath);
+    }
+
+    /// <summary>
+    /// Retourne directement le chemin réseau pour l'affichage plein écran
+    /// Pas de cache - lecture directe depuis le réseau
+    /// </summary>
+    public Task<string?> GetFullSizeImagePathAsync(string networkPath)
+    {
+        // Vérifier que le fichier existe
+        if (!File.Exists(networkPath))
         {
-            return cachePath;
+            Console.WriteLine($"⚠️ Fichier introuvable: {networkPath}");
+            return Task.FromResult<string?>(null);
         }
 
-        return await CacheImageAsync(networkPath, cachePath);
+        Console.WriteLine($"📥 Lecture directe depuis réseau: {Path.GetFileName(networkPath)}");
+
+        // Retourner directement le chemin réseau
+        return Task.FromResult<string?>(networkPath);
     }
 
-    private async Task<string?> CacheImageAsync(string networkPath, string cachePath)
+    private async Task<string?> CreateThumbnailFromNetworkAsync(string networkPath, string thumbnailPath)
     {
         await _cacheLock.WaitAsync();
         try
         {
-            if (File.Exists(cachePath))
-                return cachePath;
+            if (File.Exists(thumbnailPath))
+                return thumbnailPath;
 
             if (!File.Exists(networkPath))
                 return null;
 
-            using var sourceStream = new FileStream(networkPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
-            using var destStream = new FileStream(cachePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
-            await sourceStream.CopyToAsync(destStream);
-
-            return cachePath;
+            return await _thumbnailService.CreateThumbnailAsync(networkPath, thumbnailPath);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Erreur cache image: {ex.Message}");
+            Console.WriteLine($"Erreur création miniature: {ex.Message}");
             return null;
         }
         finally
@@ -77,9 +103,6 @@ public class ImageCacheService
         }
     }
 
-    /// <summary>
-    /// Démarre le chargement des images en arrière-plan sans bloquer
-    /// </summary>
     public void StartLoadingImagesInBackground()
     {
         if (_imageLoadingTask != null)
@@ -87,78 +110,275 @@ public class ImageCacheService
 
         _imageLoadingTask = Task.Run(async () =>
         {
-            var images = new List<string>();
             var networkFolder = NetworkFolder;
 
             if (string.IsNullOrWhiteSpace(networkFolder) || !Directory.Exists(networkFolder))
-                return images;
+                return new List<string>();
 
-            try
+            var cachedData = await LoadImageListFromCacheAsync(networkFolder);
+            if (cachedData != null)
             {
-                // Énumération progressive avec notifications
-                var enumerationOptions = new EnumerationOptions
-                {
-                    RecurseSubdirectories = true,
-                    IgnoreInaccessible = true,
-                    ReturnSpecialDirectories = false,
-                    BufferSize = 16384 // Buffer optimisé pour réseau
-                };
+                Console.WriteLine($"Cache chargé: {cachedData.Images.Count} images");
 
-                int batchCount = 0;
-                foreach (var file in Directory.EnumerateFiles(networkFolder, "*.*", enumerationOptions))
+                foreach (var image in cachedData.Images)
                 {
-                    if (IsImageFile(file))
-                    {
-                        images.Add(file);
-                        _discoveredImages.Add(file);
-                        batchCount++;
-
-                        // Notifier tous les 50 fichiers pour permettre l'affichage progressif
-                        if (batchCount % 50 == 0)
-                        {
-                            OnImagesDiscovered?.Invoke(_discoveredImages.Count);
-                            await Task.Delay(1); // Permet aux autres tâches de s'exécuter
-                        }
-                    }
+                    _discoveredImages.Add(image);
                 }
-
-                // Notification finale
                 OnImagesDiscovered?.Invoke(_discoveredImages.Count);
+
+                _ = Task.Run(() => IncrementalScanAsync(networkFolder, cachedData));
+                StartFolderWatcher(networkFolder);
+
+                return cachedData.Images;
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Erreur chargement images: {ex.Message}");
-            }
+
+            var images = await ScanNetworkFolderAsync(networkFolder);
+            await SaveImageListToCacheAsync(networkFolder, images);
+            StartFolderWatcher(networkFolder);
 
             return images;
         });
     }
 
-    /// <summary>
-    /// Retourne les images découvertes jusqu'à présent (non bloquant)
-    /// </summary>
-    public List<string> GetDiscoveredImages()
+    private async Task IncrementalScanAsync(string networkFolder, ImageListCache cachedData)
     {
-        return _discoveredImages.ToList();
+        try
+        {
+            var lastScanDate = cachedData.LastUpdate;
+            var newImages = new List<string>();
+
+            Console.WriteLine($"Scan incrémental depuis {lastScanDate}...");
+
+            var enumerationOptions = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                ReturnSpecialDirectories = false,
+                BufferSize = 16384
+            };
+
+            foreach (var file in Directory.EnumerateFiles(networkFolder, "*.*", enumerationOptions))
+            {
+                if (!IsImageFile(file))
+                    continue;
+
+                var fileInfo = new FileInfo(file);
+                if (fileInfo.LastWriteTime > lastScanDate || !cachedData.Images.Contains(file))
+                {
+                    if (!_discoveredImages.Contains(file))
+                    {
+                        newImages.Add(file);
+                        _discoveredImages.Add(file);
+                        OnNewImageDetected?.Invoke(file);
+                        await Task.Delay(1);
+                    }
+                }
+            }
+
+            if (newImages.Count > 0)
+            {
+                Console.WriteLine($"🆕 {newImages.Count} nouvelles images détectées");
+                var allImages = cachedData.Images.Concat(newImages).Distinct().ToList();
+                await SaveImageListToCacheAsync(networkFolder, allImages);
+                OnImagesDiscovered?.Invoke(_discoveredImages.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur scan incrémental: {ex.Message}");
+        }
     }
 
-    /// <summary>
-    /// Attend que toutes les images soient chargées (si nécessaire)
-    /// </summary>
+    private void StartFolderWatcher(string networkFolder)
+    {
+        try
+        {
+            StopFolderWatcher();
+
+            _folderWatcher = new FileSystemWatcher(networkFolder)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+                EnableRaisingEvents = true
+            };
+
+            _folderWatcher.Created += async (s, e) =>
+            {
+                if (IsImageFile(e.FullPath))
+                {
+                    await Task.Delay(500);
+                    if (!_discoveredImages.Contains(e.FullPath))
+                    {
+                        _discoveredImages.Add(e.FullPath);
+                        OnNewImageDetected?.Invoke(e.FullPath);
+                        OnImagesDiscovered?.Invoke(_discoveredImages.Count);
+
+                        var allImages = _discoveredImages.ToList();
+                        await SaveImageListToCacheAsync(networkFolder, allImages);
+                    }
+                }
+            };
+
+            Console.WriteLine("👁️ Surveillance activée");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Impossible de surveiller: {ex.Message}");
+        }
+    }
+
+    private void StopFolderWatcher()
+    {
+        if (_folderWatcher != null)
+        {
+            _folderWatcher.EnableRaisingEvents = false;
+            _folderWatcher.Dispose();
+            _folderWatcher = null;
+        }
+    }
+
+    private async Task<List<string>> ScanNetworkFolderAsync(string networkFolder)
+    {
+        var images = new List<string>();
+
+        try
+        {
+            var enumerationOptions = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                ReturnSpecialDirectories = false,
+                BufferSize = 16384
+            };
+
+            int batchCount = 0;
+            foreach (var file in Directory.EnumerateFiles(networkFolder, "*.*", enumerationOptions))
+            {
+                if (IsImageFile(file))
+                {
+                    images.Add(file);
+                    _discoveredImages.Add(file);
+                    batchCount++;
+
+                    if (batchCount % 50 == 0)
+                    {
+                        OnImagesDiscovered?.Invoke(_discoveredImages.Count);
+                        await Task.Delay(1);
+                    }
+                }
+            }
+
+            OnImagesDiscovered?.Invoke(_discoveredImages.Count);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur chargement: {ex.Message}");
+        }
+
+        return images;
+    }
+
+    private async Task<ImageListCache?> LoadImageListFromCacheAsync(string networkFolder)
+    {
+        try
+        {
+            if (!File.Exists(_imageListCachePath))
+                return null;
+
+            var json = await File.ReadAllTextAsync(_imageListCachePath);
+            var cache = JsonSerializer.Deserialize<ImageListCache>(json);
+
+            if (cache?.NetworkFolder != networkFolder)
+                return null;
+
+            var absoluteImages = cache.Images
+                .Select(relativePath => Path.Combine(networkFolder, relativePath))
+                .ToList();
+
+            cache.Images = absoluteImages;
+
+            if (cache.Images.Count > 0)
+            {
+                var sampleSize = Math.Min(5, cache.Images.Count);
+                var sample = cache.Images.Take(sampleSize);
+                if (sample.All(img => !File.Exists(img)))
+                {
+                    Console.WriteLine("⚠️ Cache invalide");
+                    return null;
+                }
+            }
+
+            return cache;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur lecture cache: {ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task SaveImageListToCacheAsync(string networkFolder, List<string> images)
+    {
+        try
+        {
+            var relativeImages = images
+                .Select(path => Path.GetRelativePath(networkFolder, path))
+                .ToList();
+
+            var cache = new ImageListCache
+            {
+                NetworkFolder = networkFolder,
+                LastUpdate = DateTime.Now,
+                Images = relativeImages
+            };
+
+            var json = JsonSerializer.Serialize(cache, new JsonSerializerOptions { WriteIndented = false });
+
+            var jsonSizeMb = json.Length / (1024.0 * 1024.0);
+            Console.WriteLine($"💾 Cache: {images.Count} images, {jsonSizeMb:F2} Mo");
+
+            await File.WriteAllTextAsync(_imageListCachePath, json);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur sauvegarde: {ex.Message}");
+        }
+    }
+
+    private void DeleteImageListCache()
+    {
+        try
+        {
+            if (File.Exists(_imageListCachePath))
+                File.Delete(_imageListCachePath);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur suppression: {ex.Message}");
+        }
+    }
+
+    public List<string> GetDiscoveredImages() => _discoveredImages.ToList();
+
     public async Task<List<string>> GetAllNetworkImagesAsync()
     {
         if (_imageLoadingTask == null)
-        {
             StartLoadingImagesInBackground();
-        }
 
         return await _imageLoadingTask!;
     }
 
-    /// <summary>
-    /// Vérifie si le chargement est terminé
-    /// </summary>
     public bool IsLoadingComplete => _imageLoadingTask?.IsCompleted ?? false;
+
+    public async Task RefreshImageListAsync()
+    {
+        StopFolderWatcher();
+        _imageLoadingTask = null;
+        _discoveredImages.Clear();
+        DeleteImageListCache();
+        StartLoadingImagesInBackground();
+        await GetAllNetworkImagesAsync();
+    }
 
     private bool IsImageFile(string path)
     {
@@ -166,49 +386,47 @@ public class ImageCacheService
         return ext is ".jpg" or ".jpeg" or ".png" or ".bmp" or ".gif";
     }
 
-    private string GetCacheFileName(string networkPath)
+    private string GetCacheFileName(string networkPath, string suffix = "")
     {
         using var md5 = MD5.Create();
         var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(networkPath));
         var hashString = BitConverter.ToString(hash).Replace("-", "").ToLower();
-        var extension = Path.GetExtension(networkPath);
-        return $"{hashString}{extension}";
-    }
-
-    public async Task PreloadImagesAsync(List<string> imagePaths, int maxConcurrent = 5)
-    {
-        var semaphore = new SemaphoreSlim(maxConcurrent, maxConcurrent);
-        var tasks = imagePaths.Select(async path =>
-        {
-            await semaphore.WaitAsync();
-            try
-            {
-                await GetCachedImagePathAsync(path);
-            }
-            finally
-            {
-                semaphore.Release();
-            }
-        });
-
-        await Task.WhenAll(tasks);
+        return $"{hashString}{suffix}{Path.GetExtension(networkPath)}";
     }
 
     public void ClearCache()
     {
         try
         {
+            StopFolderWatcher();
             _discoveredImages.Clear();
             _imageLoadingTask = null;
-            if (Directory.Exists(_cacheFolder))
+            DeleteImageListCache();
+
+            if (Directory.Exists(_thumbnailsFolder))
             {
-                Directory.Delete(_cacheFolder, true);
-                Directory.CreateDirectory(_cacheFolder);
+                Directory.Delete(_thumbnailsFolder, true);
+                Directory.CreateDirectory(_thumbnailsFolder);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Erreur nettoyage cache: {ex.Message}");
+            Console.WriteLine($"Erreur nettoyage: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Méthode de compatibilité - retourne les thumbnails
+    /// </summary>
+    public async Task<string?> GetCachedImagePathAsync(string networkPath)
+    {
+        return await GetThumbnailPathAsync(networkPath);
+    }
+
+    private class ImageListCache
+    {
+        public string NetworkFolder { get; set; } = string.Empty;
+        public DateTime LastUpdate { get; set; }
+        public List<string> Images { get; set; } = new();
     }
 }

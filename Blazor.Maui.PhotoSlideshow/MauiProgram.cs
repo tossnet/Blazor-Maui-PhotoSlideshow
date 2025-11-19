@@ -17,9 +17,10 @@ namespace Blazor.Maui.PhotoSlideshow
 
             builder.Services.AddMauiBlazorWebView();
 
-            builder.Services.AddSingleton<ImageCacheService>();
             builder.Services.AddSingleton<SlideshowService>();
             builder.Services.AddSingleton<ImageConverterService>();
+            builder.Services.AddSingleton<ThumbnailService>();
+            builder.Services.AddSingleton<ImageCacheService>();
 
 #if DEBUG
             builder.Services.AddBlazorWebViewDeveloperTools();

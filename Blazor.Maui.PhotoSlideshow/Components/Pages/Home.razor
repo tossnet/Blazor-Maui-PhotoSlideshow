@@ -9,14 +9,23 @@
 <div class="slideshow-container">
     @if (_currentImages.Any())
     {
-        <div class="mosaic-grid">
+        <div class="mosaic-grid @(SlideshowService.IsAnimationRunning ? "animated" : "")">
             @foreach (var image in _currentImages)
             {
                 @if (!string.IsNullOrEmpty(image.CachedPath))
                 {
                     <div class="image-item @(image.IsFullScreen ? "fullscreen" : "")"
-                         style="@(image.IsFullScreen ? $"transform: rotate({image.Rotation}deg) scale({image.Scale}); opacity: {image.Opacity}; z-index: 1000;" : $"opacity: {image.Opacity};")">
-                        <img src="@ImageConverter.ConvertToBase64(image.CachedPath)" alt="Photo" />
+                         style="@(image.IsFullScreen ? $"opacity: {image.Opacity}; z-index: 1000;" : $"opacity: {image.Opacity};")">
+                        @if (image.IsFullScreen && !string.IsNullOrEmpty(image.FullscreenPath))
+                        {
+                            @* Afficher l'image COMPLÈTE en plein écran *@
+                            <img src="@GetImageSource(image.FullscreenPath)" alt="Photo" loading="lazy" />
+                        }
+                        else if (!string.IsNullOrEmpty(image.CachedPath))
+                        {
+                            @* Afficher la MINIATURE en mosaïque *@
+                            <img src="@GetImageSource(image.CachedPath)" alt="Photo" loading="lazy" />
+                        }
                     </div>
                 }
             }
@@ -48,6 +57,8 @@
         {
             <p>✓ @SlideshowService.TotalImages images chargées</p>
         }
+        @* NOUVEAU: Afficher les stats du cache *@
+        <p style="font-size: 0.8em; opacity: 0.7;">Cache: @_cacheStats.count images (@_cacheStats.pending en cours)</p>
     </div>
 </div>
 
@@ -71,25 +82,130 @@
     private bool _showSettings = false;
     private string _networkFolderInput = string.Empty;
     private List<ImageItem> _currentImages = new();
+    private Dictionary<string, string> _imageSourceCache = new();
+    
+    // OPTIMISÉ: Compteur pour debouncing des rafraîchissements UI
+    private int _imageUpdateCounter = 0;
+    private const int UI_UPDATE_BATCH_SIZE = 20;
+    private (int count, int pending) _cacheStats = (0, 0);
 
     protected override async Task OnInitializedAsync()
     {
         _networkFolderInput = ImageCacheService.NetworkFolder;
-        
+
         SlideshowService.OnImagesChanged += OnImagesChanged;
         SlideshowService.OnFullScreenChanged += OnFullScreenChanged;
 
         await SlideshowService.InitializeAsync();
         UpdateImageSnapshot();
+
+        // Précharger les premières images visibles en arrière-plan
+        _ = PreloadVisibleImagesAsync();
+
+        // Démarrer l'animation automatiquement après un court délai
+        await Task.Delay(2000);
+        if (_currentImages.Any() && !_isRunning)
+        {
+            ToggleAnimation();
+        }
+
+        // NOUVEAU: Timer pour mettre à jour les stats du cache
+        _ = UpdateCacheStatsLoop();
     }
 
+    /// <summary>
+    /// OPTIMISÉ: Obtenir la source de l'image (Base64) avec chargement progressif
+    /// </summary>
+    private string GetImageSource(string imagePath)
+    {
+        // Si déjà en cache local, retourner immédiatement
+        if (_imageSourceCache.TryGetValue(imagePath, out var source))
+            return source;
+
+        // Retourner un placeholder et charger en arrière-plan
+        _ = LoadImageSourceAsync(imagePath);
+
+        return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%232a2a2a' width='100' height='100'/%3E%3C/svg%3E";
+    }
+
+    /// <summary>
+    /// OPTIMISÉ: Charger l'image de manière asynchrone avec cache local
+    /// </summary>
+    private async Task LoadImageSourceAsync(string imagePath)
+    {
+        try
+        {
+            var source = await ImageConverter.ConvertToBase64Async(imagePath);
+            _imageSourceCache[imagePath] = source;
+
+            // Rafraîchir l'UI uniquement si nécessaire
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur chargement image: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// OPTIMISÉ: Précharger uniquement les images visibles
+    /// </summary>
+    private async Task PreloadVisibleImagesAsync()
+    {
+        // Limiter le préchargement aux 50 premières images pour éviter la surcharge
+        var imagesToPreload = _currentImages
+            .Take(50)
+            .Where(img => !string.IsNullOrEmpty(img.CachedPath))
+            .Select(img => img.CachedPath!)
+            .ToList();
+
+        // Précharger par lots de 10 pour ne pas surcharger
+        foreach (var batch in imagesToPreload.Chunk(10))
+        {
+            var tasks = batch.Select(path => LoadImageSourceAsync(path));
+            await Task.WhenAll(tasks);
+            await Task.Delay(100); // Petit délai entre les lots
+        }
+    }
+
+    /// <summary>
+    /// NOUVEAU: Mise à jour périodique des stats du cache
+    /// </summary>
+    private async Task UpdateCacheStatsLoop()
+    {
+        while (!_isDisposed)
+        {
+            _cacheStats = ImageConverter.GetCacheStats();
+            await Task.Delay(2000);
+        }
+    }
+
+    private bool _isDisposed = false;
+
+    /// <summary>
+    /// OPTIMISÉ: Debouncing - rafraîchir UI tous les 20 images au lieu de chaque fois
+    /// </summary>
     private void OnImagesChanged()
     {
-        InvokeAsync(() =>
+        _imageUpdateCounter++;
+        
+        // Rafraîchir uniquement tous les N images OU quand le chargement est terminé
+        if (_imageUpdateCounter % UI_UPDATE_BATCH_SIZE == 0 || SlideshowService.IsLoadingComplete)
         {
+            InvokeAsync(() =>
+            {
+                UpdateImageSnapshot();
+                StateHasChanged();
+                
+                // Précharger les nouvelles images
+                _ = PreloadVisibleImagesAsync();
+            });
+        }
+        else
+        {
+            // Mise à jour silencieuse sans StateHasChanged()
             UpdateImageSnapshot();
-            StateHasChanged();
-        });
+        }
     }
 
     private void OnFullScreenChanged(int index)
@@ -98,6 +214,13 @@
         {
             UpdateImageSnapshot();
             StateHasChanged();
+
+            // Précharger l'image plein écran
+            var fullscreenImage = _currentImages.FirstOrDefault(img => img.IsFullScreen);
+            if (fullscreenImage?.FullscreenPath != null)
+            {
+                _ = LoadImageSourceAsync(fullscreenImage.FullscreenPath);
+            }
         });
     }
 
@@ -143,6 +266,8 @@
         SlideshowService.StopAnimation();
         _isRunning = false;
         ImageConverter.ClearCache();
+        _imageSourceCache.Clear();
+        _imageUpdateCounter = 0;
 
         await SlideshowService.InitializeAsync();
         UpdateImageSnapshot();
@@ -151,8 +276,11 @@
 
     public void Dispose()
     {
+        _isDisposed = true;
         SlideshowService.OnImagesChanged -= OnImagesChanged;
         SlideshowService.OnFullScreenChanged -= OnFullScreenChanged;
         SlideshowService.StopAnimation();
+        _imageSourceCache.Clear();
+        ImageConverter.ClearCache();
     }
 }

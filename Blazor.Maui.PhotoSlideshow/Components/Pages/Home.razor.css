@@ -1,39 +1,68 @@
-body {
-    margin: 0;
-    padding: 0;
-}
-
 .slideshow-container {
     width: 100%;
     height: 100vh;
-    overflow: auto;
+    overflow: hidden;
     background: #1a1a1a;
     position: relative;
 }
 
 .mosaic-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 10px;
-    padding: 20px;
-    width: 100%;
+    padding: 10px;
+    width: 200%;
     box-sizing: border-box;
+    align-items: flex-start;
+    /* Optimisation GPU */
+    will-change: transform;
+    transform: translateZ(0);
+}
+
+    /* Animation CSS avec optimisation GPU */
+    .mosaic-grid.animated {
+        animation: panGrid 120s infinite linear;
+    }
+
+@keyframes panGrid {
+    0% {
+        transform: translate3d(0, 0, 0);
+    }
+
+    25% {
+        transform: translate3d(-30%, -20%, 0);
+    }
+
+    50% {
+        transform: translate3d(-50%, -10%, 0);
+    }
+
+    75% {
+        transform: translate3d(-20%, -30%, 0);
+    }
+
+    100% {
+        transform: translate3d(0, 0, 0);
+    }
 }
 
 .image-item {
     position: relative;
-    width: 100%;
-    aspect-ratio: 4/3;
+    flex: 0 0 auto;
     overflow: hidden;
     border-radius: 8px;
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
     background: #2a2a2a;
-    transition: opacity 0.5s ease-in-out, transform 0.3s ease;
+    /* Suppression de la transition permanente */
+    /* Optimisation GPU */
+    transform: translateZ(0);
 }
 
+    /* Hover désactivé ou très simplifié pour réduire la charge */
     .image-item:hover {
-        transform: scale(1.05);
-        z-index: 10;
+        /* transform: scale(1.05); -- COMMENTÉ pour performance */
+        /* z-index: 10; -- COMMENTÉ pour performance */
+        opacity: 0.95; /* Effet plus léger */
     }
 
     .image-item.fullscreen {
@@ -44,17 +73,21 @@ body {
         height: 100vh !important;
         z-index: 1000 !important;
         border-radius: 0;
-        aspect-ratio: auto;
+        animation: none !important;
     }
 
     .image-item img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
         display: block;
+        height: 300px;
+        width: auto;
+        /* Optimisation du rendu d'image */
+        image-rendering: -webkit-optimize-contrast;
+        backface-visibility: hidden;
     }
 
     .image-item.fullscreen img {
+        width: 100%;
+        height: 100%;
         object-fit: contain;
     }
 

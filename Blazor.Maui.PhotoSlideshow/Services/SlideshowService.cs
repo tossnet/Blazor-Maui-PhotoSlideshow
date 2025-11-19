@@ -8,16 +8,17 @@ public class SlideshowService
     private List<ImageItem> _images = new();
     private List<string> _allNetworkImages = new();
     private Random _random = new();
-    private System.Timers.Timer? _animationTimer;
     private System.Timers.Timer? _fullscreenTimer;
     private System.Timers.Timer? _loadingTimer;
     private int _currentFullscreenIndex = -1;
     private int _lastProcessedDiscoveredCount = 0;
     private bool _isLoadingComplete = false;
     private readonly SemaphoreSlim _loadingSemaphore = new(3, 3);
+    private string? _nextFullscreenImagePath; // Préchargement
+    private bool _isAnimationRunning = false;
 
-    // LIMITE CRITIQUE : Nombre maximum d'images en mémoire
-    private const int MAX_VISIBLE_IMAGES = 50; // Réduit drastiquement pour éviter l'overflow JSON
+    // AUGMENTÉ : Afficher beaucoup de miniatures pour créer un grand mur
+    private const int MAX_VISIBLE_IMAGES = 150; // Grand mur de miniatures
 
     public event Action? OnImagesChanged;
     public event Action<int>? OnFullScreenChanged;
@@ -27,6 +28,7 @@ public class SlideshowService
     public int TotalImages => _allNetworkImages.Count;
     public int LoadedImages => _lastProcessedDiscoveredCount;
     public bool IsLoadingComplete => _isLoadingComplete;
+    public bool IsAnimationRunning => _isAnimationRunning;
 
     public SlideshowService(ImageCacheService cacheService)
     {
@@ -56,7 +58,6 @@ public class SlideshowService
         if (index >= _allNetworkImages.Count)
             return;
 
-        // NE PAS CHARGER si on a déjà trop d'images
         if (_images.Count >= MAX_VISIBLE_IMAGES)
             return;
 
@@ -71,13 +72,11 @@ public class SlideshowService
             var item = new ImageItem
             {
                 NetworkPath = networkPath,
-                X = _random.NextDouble() * 80 + 10,
-                Y = _random.NextDouble() * 80 + 10,
-                Scale = 0.3 + _random.NextDouble() * 0.3,
-                Rotation = _random.NextDouble() * 360
+                Opacity = 1.0
             };
 
-            item.CachedPath = await _cacheService.GetCachedImagePathAsync(item.NetworkPath);
+            // Charger la MINIATURE pour la mosaïque (rapide et léger)
+            item.CachedPath = await _cacheService.GetThumbnailPathAsync(item.NetworkPath);
 
             if (!string.IsNullOrEmpty(item.CachedPath))
             {
@@ -92,12 +91,18 @@ public class SlideshowService
 
     private void StartProgressiveLoading()
     {
-        _loadingTimer = new System.Timers.Timer(1000); // Ralenti à 1 seconde
+        _loadingTimer = new System.Timers.Timer(300);
         _loadingTimer.Elapsed += async (s, e) =>
         {
             try
             {
-                // Arrêter si on a atteint la limite
+                var discoveredImages = _cacheService.GetDiscoveredImages();
+
+                if (discoveredImages.Count > 0)
+                {
+                    _allNetworkImages = discoveredImages;
+                }
+
                 if (_images.Count >= MAX_VISIBLE_IMAGES)
                 {
                     _isLoadingComplete = true;
@@ -110,43 +115,27 @@ public class SlideshowService
                     return;
                 }
 
-                var discoveredImages = _cacheService.GetDiscoveredImages();
-
-                if (discoveredImages.Count > _lastProcessedDiscoveredCount)
+                if (_lastProcessedDiscoveredCount < _allNetworkImages.Count)
                 {
-                    _allNetworkImages = discoveredImages;
-
-                    // Charger seulement 5 images à la fois (réduit de 10)
                     var remainingSlots = MAX_VISIBLE_IMAGES - _images.Count;
-                    var batchSize = Math.Min(5, remainingSlots);
+                    var batchSize = Math.Min(20, remainingSlots);
+                    var imagesToLoadCount = Math.Min(batchSize, _allNetworkImages.Count - _lastProcessedDiscoveredCount);
 
-                    var imagesToLoad = _allNetworkImages
-                        .Skip(_lastProcessedDiscoveredCount)
-                        .Take(batchSize)
+                    var tasks = Enumerable.Range(_lastProcessedDiscoveredCount, imagesToLoadCount)
+                        .Select(i => LoadImageAtIndexAsync(i))
                         .ToList();
 
-                    if (imagesToLoad.Any())
+                    await Task.WhenAll(tasks);
+
+                    _lastProcessedDiscoveredCount += imagesToLoadCount;
+
+                    await MainThread.InvokeOnMainThreadAsync(() =>
                     {
-                        var tasks = imagesToLoad
-                            .Select(path => LoadImageAtIndexAsync(_allNetworkImages.IndexOf(path)))
-                            .ToList();
-
-                        await Task.WhenAll(tasks);
-
-                        _lastProcessedDiscoveredCount = Math.Min(
-                            _lastProcessedDiscoveredCount + batchSize,
-                            _allNetworkImages.Count
-                        );
-
-                        await MainThread.InvokeOnMainThreadAsync(() =>
-                        {
-                            OnImagesChanged?.Invoke();
-                        });
-                    }
+                        OnImagesChanged?.Invoke();
+                    });
                 }
 
-                // Le scan continue en arrière-plan mais on arrête de charger des images
-                if (_cacheService.IsLoadingComplete)
+                if (_cacheService.IsLoadingComplete && _lastProcessedDiscoveredCount >= _allNetworkImages.Count)
                 {
                     _loadingTimer?.Stop();
                     _isLoadingComplete = true;
@@ -167,12 +156,7 @@ public class SlideshowService
 
     public void StartAnimation()
     {
-        _animationTimer = new System.Timers.Timer(50);
-        _animationTimer.Elapsed += (s, e) =>
-        {
-            MainThread.BeginInvokeOnMainThread(() => AnimateImages());
-        };
-        _animationTimer.Start();
+        _isAnimationRunning = true;
 
         _fullscreenTimer = new System.Timers.Timer(FullScreenInterval);
         _fullscreenTimer.Elapsed += (s, e) =>
@@ -180,32 +164,40 @@ public class SlideshowService
             MainThread.BeginInvokeOnMainThread(() => ShowNextFullscreen());
         };
         _fullscreenTimer.Start();
+
+        // Précharger la première image plein écran
+        _ = PreloadNextFullscreenImageAsync();
+
+        Console.WriteLine("🚀 Animation démarrée !");
+        OnImagesChanged?.Invoke();
     }
 
     public void StopAnimation()
     {
-        _animationTimer?.Stop();
+        _isAnimationRunning = false;
         _fullscreenTimer?.Stop();
+        Console.WriteLine("⏸️ Animation arrêtée");
+        OnImagesChanged?.Invoke();
     }
 
-    private void AnimateImages()
+    private async Task PreloadNextFullscreenImageAsync()
     {
-        foreach (var img in _images.Where(i => !i.IsFullScreen))
+        try
         {
-            var angle = (DateTime.Now.Ticks / 10000000.0) + img.Rotation;
+            if (!_images.Any())
+                return;
 
-            img.X += Math.Cos(angle) * 0.5;
-            img.Y += Math.Sin(angle) * 0.5;
+            var nextIndex = _random.Next(_images.Count);
+            var nextImage = _images[nextIndex];
 
-            if (img.X < -10) img.X = 110;
-            if (img.X > 110) img.X = -10;
-            if (img.Y < -10) img.Y = 110;
-            if (img.Y > 110) img.Y = -10;
+            Console.WriteLine($"🔄 Préchargement plein écran: {Path.GetFileName(nextImage.NetworkPath)}");
 
-            img.Rotation += 0.2;
+            _nextFullscreenImagePath = await _cacheService.GetFullSizeImagePathAsync(nextImage.NetworkPath);
         }
-
-        OnImagesChanged?.Invoke();
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur préchargement: {ex.Message}");
+        }
     }
 
     private void ShowNextFullscreen()
@@ -213,53 +205,60 @@ public class SlideshowService
         if (!_images.Any())
             return;
 
-        // Retirer l'ancienne image fullscreen et charger une nouvelle aléatoire
+        // Retirer l'ancienne image fullscreen et la remplacer
         if (_currentFullscreenIndex >= 0 && _currentFullscreenIndex < _images.Count)
         {
             var oldImage = _images[_currentFullscreenIndex];
             oldImage.IsFullScreen = false;
+            oldImage.FullscreenPath = null;
 
-            // Remplacer l'ancienne image par une nouvelle du pool disponible
-            if (_allNetworkImages.Count > MAX_VISIBLE_IMAGES)
-            {
-                ReplaceImageWithNewOne(_currentFullscreenIndex);
-            }
+            // Remplacer par une nouvelle thumbnail
+            ReplaceImageWithNewOne(_currentFullscreenIndex);
         }
 
+        // Afficher la nouvelle image plein écran
         _currentFullscreenIndex = _random.Next(_images.Count);
-        _images[_currentFullscreenIndex].IsFullScreen = true;
+        var currentImage = _images[_currentFullscreenIndex];
+        currentImage.IsFullScreen = true;
+
+        if (!string.IsNullOrEmpty(_nextFullscreenImagePath))
+        {
+            currentImage.FullscreenPath = _nextFullscreenImagePath;
+            Console.WriteLine($"✅ Affichage plein écran: {Path.GetFileName(currentImage.NetworkPath)}");
+        }
 
         OnFullScreenChanged?.Invoke(_currentFullscreenIndex);
+
+        _ = PreloadNextFullscreenImageAsync();
     }
 
     private async void ReplaceImageWithNewOne(int indexToReplace)
     {
         try
         {
-            // Choisir une image aléatoire non encore affichée
             var availableImages = _allNetworkImages
                 .Where(path => !_images.Any(i => i.NetworkPath == path))
                 .ToList();
 
             if (!availableImages.Any())
-                return;
+            {
+                availableImages = _allNetworkImages;
+            }
 
             var newPath = availableImages[_random.Next(availableImages.Count)];
 
             var item = new ImageItem
             {
                 NetworkPath = newPath,
-                X = _random.NextDouble() * 80 + 10,
-                Y = _random.NextDouble() * 80 + 10,
-                Scale = 0.3 + _random.NextDouble() * 0.3,
-                Rotation = _random.NextDouble() * 360
+                Opacity = 1.0
             };
 
-            item.CachedPath = await _cacheService.GetCachedImagePathAsync(item.NetworkPath);
+            item.CachedPath = await _cacheService.GetThumbnailPathAsync(item.NetworkPath);
 
             if (!string.IsNullOrEmpty(item.CachedPath))
             {
                 _images[indexToReplace] = item;
+                Console.WriteLine($"🔄 Miniature remplacée: {Path.GetFileName(newPath)}");
                 OnImagesChanged?.Invoke();
             }
         }
@@ -272,7 +271,6 @@ public class SlideshowService
     public void Dispose()
     {
         _cacheService.OnImagesDiscovered -= OnNetworkImagesDiscovered;
-        _animationTimer?.Dispose();
         _fullscreenTimer?.Dispose();
         _loadingTimer?.Dispose();
         _loadingSemaphore?.Dispose();
