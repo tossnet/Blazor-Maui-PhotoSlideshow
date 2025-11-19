@@ -8,7 +8,7 @@ public class SlideshowService
     private List<ImageItem> _images = new();
     private List<string> _allNetworkImages = new();
     private Random _random = new();
-    private System.Timers.Timer? _fullscreenTimer;
+    private System.Timers.Timer? _cycleTimer;
     private System.Timers.Timer? _loadingTimer;
     private int _currentFullscreenIndex = -1;
     private int _lastProcessedDiscoveredCount = 0;
@@ -16,15 +16,19 @@ public class SlideshowService
     private readonly SemaphoreSlim _loadingSemaphore = new(3, 3);
     private string? _nextFullscreenImagePath; // Préchargement
     private bool _isAnimationRunning = false;
+    private bool _isShowingFullscreen = false;
+    private HashSet<string> _displayedImages = new(); // Track des images déjà affichées
 
     // AUGMENTÉ : Afficher beaucoup de miniatures pour créer un grand mur
     private const int MAX_VISIBLE_IMAGES = 150; // Grand mur de miniatures
+    private const int INITIAL_RANDOM_COUNT = 30; // Nombre d'images aléatoires au démarrage
 
     public event Action? OnImagesChanged;
     public event Action<int>? OnFullScreenChanged;
 
     public List<ImageItem> Images => _images;
-    public int FullScreenInterval { get; set; } = 5000;
+    public int MosaicDisplayDuration { get; set; } = 5000; // 5 secondes de mosaïque
+    public int FullscreenDisplayDuration { get; set; } = 3000; // 3 secondes en plein écran
     public int TotalImages => _allNetworkImages.Count;
     public int LoadedImages => _lastProcessedDiscoveredCount;
     public bool IsLoadingComplete => _isLoadingComplete;
@@ -51,6 +55,35 @@ public class SlideshowService
         {
             OnImagesChanged?.Invoke();
         });
+    }
+
+    /// <summary>
+    /// Sélectionne des images aléatoires non encore affichées
+    /// </summary>
+    private List<string> GetRandomUnusedImages(int count)
+    {
+        var unusedImages = _allNetworkImages
+            .Where(path => !_displayedImages.Contains(path))
+            .ToList();
+
+        // Si pas assez d'images non utilisées, réinitialiser
+        if (unusedImages.Count < count)
+        {
+            _displayedImages.Clear();
+            unusedImages = _allNetworkImages.ToList();
+            Console.WriteLine("🔄 Réinitialisation du pool d'images");
+        }
+
+        // Mélanger et prendre les N premières
+        var shuffled = unusedImages.OrderBy(_ => _random.Next()).Take(count).ToList();
+
+        // Marquer comme affichées
+        foreach (var img in shuffled)
+        {
+            _displayedImages.Add(img);
+        }
+
+        return shuffled;
     }
 
     private async Task LoadImageAtIndexAsync(int index)
@@ -81,12 +114,51 @@ public class SlideshowService
             if (!string.IsNullOrEmpty(item.CachedPath))
             {
                 _images.Add(item);
+                _displayedImages.Add(networkPath); // Marquer comme affichée
             }
         }
         finally
         {
             _loadingSemaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Charge un lot d'images aléatoires
+    /// </summary>
+    private async Task LoadRandomImagesAsync(List<string> imagePaths)
+    {
+        var tasks = imagePaths.Select(async path =>
+        {
+            if (_images.Count >= MAX_VISIBLE_IMAGES)
+                return;
+
+            await _loadingSemaphore.WaitAsync();
+            try
+            {
+                if (_images.Any(i => i.NetworkPath == path))
+                    return;
+
+                var item = new ImageItem
+                {
+                    NetworkPath = path,
+                    Opacity = 1.0
+                };
+
+                item.CachedPath = await _cacheService.GetThumbnailPathAsync(item.NetworkPath);
+
+                if (!string.IsNullOrEmpty(item.CachedPath))
+                {
+                    _images.Add(item);
+                }
+            }
+            finally
+            {
+                _loadingSemaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks);
     }
 
     private void StartProgressiveLoading()
@@ -101,6 +173,21 @@ public class SlideshowService
                 if (discoveredImages.Count > 0)
                 {
                     _allNetworkImages = discoveredImages;
+
+                    // Au tout premier chargement, charger des images aléatoires
+                    if (_images.Count == 0 && _allNetworkImages.Count >= INITIAL_RANDOM_COUNT)
+                    {
+                        Console.WriteLine($"🎲 Chargement initial de {INITIAL_RANDOM_COUNT} images aléatoires");
+                        var randomImages = GetRandomUnusedImages(INITIAL_RANDOM_COUNT);
+                        await LoadRandomImagesAsync(randomImages);
+                        _lastProcessedDiscoveredCount = 0; // On continuera après avec les suivantes
+
+                        await MainThread.InvokeOnMainThreadAsync(() =>
+                        {
+                            OnImagesChanged?.Invoke();
+                        });
+                        return;
+                    }
                 }
 
                 if (_images.Count >= MAX_VISIBLE_IMAGES)
@@ -157,16 +244,13 @@ public class SlideshowService
     public void StartAnimation()
     {
         _isAnimationRunning = true;
-
-        _fullscreenTimer = new System.Timers.Timer(FullScreenInterval);
-        _fullscreenTimer.Elapsed += (s, e) =>
-        {
-            MainThread.BeginInvokeOnMainThread(() => ShowNextFullscreen());
-        };
-        _fullscreenTimer.Start();
+        _isShowingFullscreen = false;
 
         // Précharger la première image plein écran
         _ = PreloadNextFullscreenImageAsync();
+
+        // Démarrer le cycle : mosaïque → plein écran → mosaïque...
+        StartCycleTimer();
 
         Console.WriteLine("🚀 Animation démarrée !");
         OnImagesChanged?.Invoke();
@@ -175,8 +259,131 @@ public class SlideshowService
     public void StopAnimation()
     {
         _isAnimationRunning = false;
-        _fullscreenTimer?.Stop();
+        _cycleTimer?.Stop();
+
+        // Fermer l'image plein écran si elle est affichée
+        if (_isShowingFullscreen)
+        {
+            HideFullscreen();
+        }
+
         Console.WriteLine("⏸️ Animation arrêtée");
+        OnImagesChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Démarre le cycle alternant entre mosaïque et plein écran
+    /// </summary>
+    private void StartCycleTimer()
+    {
+        // Commencer par afficher la mosaïque
+        _cycleTimer = new System.Timers.Timer(MosaicDisplayDuration);
+        _cycleTimer.Elapsed += (s, e) =>
+        {
+            MainThread.BeginInvokeOnMainThread(() => ToggleCycle());
+        };
+        _cycleTimer.Start();
+    }
+
+    /// <summary>
+    /// Bascule entre mosaïque et plein écran
+    /// </summary>
+    private void ToggleCycle()
+    {
+        if (_isShowingFullscreen)
+        {
+            // On est en plein écran → fermer et revenir à la mosaïque
+            HideFullscreen();
+
+            // Reprogrammer le timer pour la durée de la mosaïque
+            _cycleTimer?.Stop();
+            _cycleTimer = new System.Timers.Timer(MosaicDisplayDuration);
+            _cycleTimer.Elapsed += (s, e) => MainThread.BeginInvokeOnMainThread(() => ToggleCycle());
+            _cycleTimer.Start();
+
+            Console.WriteLine("📋 Retour à la mosaïque");
+        }
+        else
+        {
+            // On est en mosaïque → afficher une image en plein écran
+            ShowNextFullscreen();
+
+            // Reprogrammer le timer pour la durée du plein écran
+            _cycleTimer?.Stop();
+            _cycleTimer = new System.Timers.Timer(FullscreenDisplayDuration);
+            _cycleTimer.Elapsed += (s, e) => MainThread.BeginInvokeOnMainThread(() => ToggleCycle());
+            _cycleTimer.Start();
+
+            Console.WriteLine("🖼️ Affichage plein écran");
+        }
+    }
+
+    /// <summary>
+    /// Affiche une image en plein écran - ATTEND que l'image soit préchargée
+    /// </summary>
+    private async void ShowNextFullscreen()
+    {
+        if (!_images.Any())
+            return;
+
+        _isShowingFullscreen = true;
+
+        // Sélectionner une image aléatoire
+        _currentFullscreenIndex = _random.Next(_images.Count);
+        var currentImage = _images[_currentFullscreenIndex];
+        currentImage.IsFullScreen = true;
+
+        // CORRECTION : Utiliser l'image préchargée puis la réinitialiser
+        string? fullscreenPath = _nextFullscreenImagePath;
+
+        // Si pas préchargée, charger maintenant
+        if (string.IsNullOrEmpty(fullscreenPath))
+        {
+            Console.WriteLine("⏳ Image plein écran non préchargée, chargement...");
+            fullscreenPath = await _cacheService.GetFullSizeImagePathAsync(currentImage.NetworkPath);
+        }
+        else
+        {
+            // Réinitialiser car on l'a utilisée
+            _nextFullscreenImagePath = null;
+        }
+
+        if (!string.IsNullOrEmpty(fullscreenPath))
+        {
+            currentImage.FullscreenPath = fullscreenPath;
+            Console.WriteLine($"✅ Affichage plein écran: {Path.GetFileName(currentImage.NetworkPath)}");
+
+            OnFullScreenChanged?.Invoke(_currentFullscreenIndex);
+        }
+        else
+        {
+            Console.WriteLine($"❌ Impossible de charger l'image plein écran");
+            currentImage.IsFullScreen = false;
+            _isShowingFullscreen = false;
+        }
+
+        // Précharger la prochaine image pour le prochain cycle
+        _ = PreloadNextFullscreenImageAsync();
+    }
+
+    /// <summary>
+    /// Ferme l'image plein écran et revient à la mosaïque
+    /// </summary>
+    private void HideFullscreen()
+    {
+        if (_currentFullscreenIndex >= 0 && _currentFullscreenIndex < _images.Count)
+        {
+            var oldImage = _images[_currentFullscreenIndex];
+            oldImage.IsFullScreen = false;
+            oldImage.FullscreenPath = null;
+
+            Console.WriteLine($"🗑️ Fermeture plein écran: {Path.GetFileName(oldImage.NetworkPath)}");
+
+            // Remplacer par une image aléatoire non encore affichée
+            ReplaceImageWithNewOne(_currentFullscreenIndex);
+        }
+
+        _isShowingFullscreen = false;
         OnImagesChanged?.Invoke();
     }
 
@@ -193,59 +400,37 @@ public class SlideshowService
             Console.WriteLine($"🔄 Préchargement plein écran: {Path.GetFileName(nextImage.NetworkPath)}");
 
             _nextFullscreenImagePath = await _cacheService.GetFullSizeImagePathAsync(nextImage.NetworkPath);
+
+            if (!string.IsNullOrEmpty(_nextFullscreenImagePath))
+            {
+                Console.WriteLine($"✅ Préchargement réussi: {Path.GetFileName(nextImage.NetworkPath)}");
+            }
+            else
+            {
+                Console.WriteLine($"⚠️ Préchargement échoué pour {Path.GetFileName(nextImage.NetworkPath)}");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Erreur préchargement: {ex.Message}");
+            _nextFullscreenImagePath = null;
         }
-    }
-
-    private void ShowNextFullscreen()
-    {
-        if (!_images.Any())
-            return;
-
-        // Retirer l'ancienne image fullscreen et la remplacer
-        if (_currentFullscreenIndex >= 0 && _currentFullscreenIndex < _images.Count)
-        {
-            var oldImage = _images[_currentFullscreenIndex];
-            oldImage.IsFullScreen = false;
-            oldImage.FullscreenPath = null;
-
-            // Remplacer par une nouvelle thumbnail
-            ReplaceImageWithNewOne(_currentFullscreenIndex);
-        }
-
-        // Afficher la nouvelle image plein écran
-        _currentFullscreenIndex = _random.Next(_images.Count);
-        var currentImage = _images[_currentFullscreenIndex];
-        currentImage.IsFullScreen = true;
-
-        if (!string.IsNullOrEmpty(_nextFullscreenImagePath))
-        {
-            currentImage.FullscreenPath = _nextFullscreenImagePath;
-            Console.WriteLine($"✅ Affichage plein écran: {Path.GetFileName(currentImage.NetworkPath)}");
-        }
-
-        OnFullScreenChanged?.Invoke(_currentFullscreenIndex);
-
-        _ = PreloadNextFullscreenImageAsync();
     }
 
     private async void ReplaceImageWithNewOne(int indexToReplace)
     {
         try
         {
-            var availableImages = _allNetworkImages
-                .Where(path => !_images.Any(i => i.NetworkPath == path))
-                .ToList();
+            // Utiliser GetRandomUnusedImages pour éviter les répétitions
+            var newImages = GetRandomUnusedImages(1);
 
-            if (!availableImages.Any())
+            if (!newImages.Any())
             {
-                availableImages = _allNetworkImages;
+                Console.WriteLine("⚠️ Aucune nouvelle image disponible");
+                return;
             }
 
-            var newPath = availableImages[_random.Next(availableImages.Count)];
+            var newPath = newImages[0];
 
             var item = new ImageItem
             {
@@ -271,7 +456,7 @@ public class SlideshowService
     public void Dispose()
     {
         _cacheService.OnImagesDiscovered -= OnNetworkImagesDiscovered;
-        _fullscreenTimer?.Dispose();
+        _cycleTimer?.Dispose();
         _loadingTimer?.Dispose();
         _loadingSemaphore?.Dispose();
     }

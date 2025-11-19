@@ -74,6 +74,30 @@
         z-index: 1000 !important;
         border-radius: 0;
         animation: none !important;
+        /* CORRECTION: Réinitialiser toutes les transformations héritées */
+        transform: none !important;
+        will-change: auto;
+    }
+
+    /* NOUVEAU: Container dédié pour l'image plein écran (en dehors de la grille) */
+    .fullscreen-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        z-index: 1000;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.5s ease-in-out;
+    }
+
+    .fullscreen-overlay img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
     }
 
     .image-item img {

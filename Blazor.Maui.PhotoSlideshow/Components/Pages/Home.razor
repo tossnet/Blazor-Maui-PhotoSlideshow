@@ -12,24 +12,35 @@
         <div class="mosaic-grid @(SlideshowService.IsAnimationRunning ? "animated" : "")">
             @foreach (var image in _currentImages)
             {
-                @if (!string.IsNullOrEmpty(image.CachedPath))
+                @if (!string.IsNullOrEmpty(image.CachedPath) && !image.IsFullScreen)
                 {
-                    <div class="image-item @(image.IsFullScreen ? "fullscreen" : "")"
-                         style="@(image.IsFullScreen ? $"opacity: {image.Opacity}; z-index: 1000;" : $"opacity: {image.Opacity};")">
-                        @if (image.IsFullScreen && !string.IsNullOrEmpty(image.FullscreenPath))
-                        {
-                            @* Afficher l'image COMPLÈTE en plein écran *@
-                            <img src="@GetImageSource(image.FullscreenPath)" alt="Photo" loading="lazy" />
-                        }
-                        else if (!string.IsNullOrEmpty(image.CachedPath))
-                        {
-                            @* Afficher la MINIATURE en mosaïque *@
-                            <img src="@GetImageSource(image.CachedPath)" alt="Photo" loading="lazy" />
-                        }
+                    <div class="image-item"
+                         style="opacity: @image.Opacity;">
+                        @* Afficher la MINIATURE en mosaïque *@
+                        <img src="@GetImageSource(image.CachedPath)" alt="Photo" loading="lazy" />
                     </div>
                 }
             }
         </div>
+
+        @* SÉPARÉ: Image plein écran en dehors de la grille *@
+        @foreach (var image in _currentImages.Where(img => img.IsFullScreen))
+        {
+            @if (!string.IsNullOrEmpty(image.FullscreenPath))
+            {
+                <div class="fullscreen-overlay" style="opacity: @image.Opacity;">
+                    @* CORRECTION: Vérifier si l'image est en cache avant affichage *@
+                    @if (_fullscreenImageBase64 != null)
+                    {
+                        <img src="@_fullscreenImageBase64" alt="Photo plein écran" />
+                    }
+                    else
+                    {
+                        <div class="loading">Chargement de l'image...</div>
+                    }
+                </div>
+            }
+        }
     }
     else
     {
@@ -83,6 +94,7 @@
     private string _networkFolderInput = string.Empty;
     private List<ImageItem> _currentImages = new();
     private Dictionary<string, string> _imageSourceCache = new();
+    private string? _fullscreenImageBase64 = null; // NOUVEAU: Cache dédié pour l'image plein écran
     
     // OPTIMISÉ: Compteur pour debouncing des rafraîchissements UI
     private int _imageUpdateCounter = 0;
@@ -195,6 +207,14 @@
             InvokeAsync(() =>
             {
                 UpdateImageSnapshot();
+                
+                // CORRECTION: Réinitialiser l'image plein écran si fermée
+                var hasFullscreen = _currentImages.Any(img => img.IsFullScreen);
+                if (!hasFullscreen)
+                {
+                    _fullscreenImageBase64 = null;
+                }
+                
                 StateHasChanged();
                 
                 // Précharger les nouvelles images
@@ -210,17 +230,37 @@
 
     private void OnFullScreenChanged(int index)
     {
-        InvokeAsync(() =>
+        InvokeAsync(async () =>
         {
             UpdateImageSnapshot();
-            StateHasChanged();
 
-            // Précharger l'image plein écran
+            // CORRECTION: Charger l'image plein écran AVANT de rafraîchir l'UI
             var fullscreenImage = _currentImages.FirstOrDefault(img => img.IsFullScreen);
             if (fullscreenImage?.FullscreenPath != null)
             {
-                _ = LoadImageSourceAsync(fullscreenImage.FullscreenPath);
+                Console.WriteLine($"🔄 Chargement image plein écran: {Path.GetFileName(fullscreenImage.FullscreenPath)}");
+                
+                _fullscreenImageBase64 = null; // Réinitialiser
+                StateHasChanged(); // Afficher "Chargement..."
+                
+                // Charger l'image
+                _fullscreenImageBase64 = await ImageConverter.ConvertToBase64Async(fullscreenImage.FullscreenPath);
+                
+                if (string.IsNullOrEmpty(_fullscreenImageBase64))
+                {
+                    Console.WriteLine($"❌ Échec chargement image plein écran");
+                }
+                else
+                {
+                    Console.WriteLine($"✅ Image plein écran chargée ({_fullscreenImageBase64.Length} caractères)");
+                }
             }
+            else
+            {
+                _fullscreenImageBase64 = null;
+            }
+
+            StateHasChanged();
         });
     }
 
@@ -267,6 +307,7 @@
         _isRunning = false;
         ImageConverter.ClearCache();
         _imageSourceCache.Clear();
+        _fullscreenImageBase64 = null;
         _imageUpdateCounter = 0;
 
         await SlideshowService.InitializeAsync();
@@ -281,6 +322,7 @@
         SlideshowService.OnFullScreenChanged -= OnFullScreenChanged;
         SlideshowService.StopAnimation();
         _imageSourceCache.Clear();
+        _fullscreenImageBase64 = null;
         ImageConverter.ClearCache();
     }
 }
