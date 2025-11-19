@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Blazor.Maui.PhotoSlideshow.Services;
+using Microsoft.Extensions.Logging;
 
 namespace Blazor.Maui.PhotoSlideshow
 {
@@ -16,8 +17,12 @@ namespace Blazor.Maui.PhotoSlideshow
 
             builder.Services.AddMauiBlazorWebView();
 
+            builder.Services.AddSingleton<ImageCacheService>();
+            builder.Services.AddSingleton<SlideshowService>();
+            builder.Services.AddSingleton<ImageConverterService>();
+
 #if DEBUG
-    		builder.Services.AddBlazorWebViewDeveloperTools();
+            builder.Services.AddBlazorWebViewDeveloperTools();
     		builder.Logging.AddDebug();
 #endif
 
