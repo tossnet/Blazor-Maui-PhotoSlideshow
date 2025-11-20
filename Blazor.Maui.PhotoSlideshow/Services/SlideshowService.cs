@@ -333,7 +333,7 @@ public class SlideshowService
         var currentImage = _images[_currentFullscreenIndex];
         currentImage.IsFullScreen = true;
 
-        // CORRECTION : Utiliser l'image préchargée puis la réinitialiser
+        // Utiliser l'image préchargée puis la réinitialiser
         string? fullscreenPath = _nextFullscreenImagePath;
 
         // Si pas préchargée, charger maintenant

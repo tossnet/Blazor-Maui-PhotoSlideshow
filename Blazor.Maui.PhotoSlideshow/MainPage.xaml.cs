@@ -1,10 +1,9 @@
-﻿namespace Blazor.Maui.PhotoSlideshow
+﻿namespace Blazor.Maui.PhotoSlideshow;
+
+public partial class MainPage : ContentPage
 {
-    public partial class MainPage : ContentPage
+    public MainPage()
     {
-        public MainPage()
-        {
-            InitializeComponent();
-        }
+        InitializeComponent();
     }
 }

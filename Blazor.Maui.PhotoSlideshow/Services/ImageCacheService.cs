@@ -299,7 +299,7 @@ public class ImageCacheService
 
             if (cache.Images.Count > 0)
             {
-                var sampleSize = Math.Min(5, cache.Images.Count);
+                var sampleSize = Math.Min(10, cache.Images.Count);
                 var sample = cache.Images.Take(sampleSize);
                 if (sample.All(img => !File.Exists(img)))
                 {

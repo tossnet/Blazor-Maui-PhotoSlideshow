@@ -14,12 +14,10 @@
     width: 200%;
     box-sizing: border-box;
     align-items: flex-start;
-    /* Optimisation GPU */
     will-change: transform;
     transform: translateZ(0);
 }
 
-    /* Animation CSS avec optimisation GPU */
     .mosaic-grid.animated {
         animation: panGrid 120s infinite linear;
     }
@@ -79,41 +77,72 @@
         will-change: auto;
     }
 
-    /* NOUVEAU: Container dédié pour l'image plein écran (en dehors de la grille) */
-    .fullscreen-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: 100vh;
-        z-index: 1000;
-        background: #000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: opacity 0.5s ease-in-out;
-    }
+.fullscreen-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1000;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.5s ease-in-out;
+}
 
     .fullscreen-overlay img {
         width: 100%;
         height: 100%;
         object-fit: contain;
+        mask-image: radial-gradient(ellipse 100% 100% at center, black 60%, transparent 100%);
+        -webkit-mask-image: radial-gradient(ellipse 100% 100% at center, black 60%, transparent 100%);
+        animation: zoomIn 0.8s ease-out forwards;
+        transform-origin: center center;
     }
 
-    .image-item img {
-        display: block;
-        height: 300px;
-        width: auto;
-        /* Optimisation du rendu d'image */
-        image-rendering: -webkit-optimize-contrast;
-        backface-visibility: hidden;
+    .fullscreen-overlay.exiting img {
+        animation: zoomOut 0.8s ease-in forwards;
     }
 
-    .image-item.fullscreen img {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
+@keyframes zoomIn {
+    from {
+        transform: scale(0.8);
+        opacity: 0.5;
     }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes zoomOut {
+    from {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    to {
+        transform: scale(0.8);
+        opacity: 0;
+    }
+}
+
+.image-item img {
+    display: block;
+    height: 300px;
+    width: auto;
+    /* Optimisation du rendu d'image */
+    image-rendering: -webkit-optimize-contrast;
+    backface-visibility: hidden;
+}
+
+.image-item.fullscreen img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
 
 .loading {
     display: flex;
