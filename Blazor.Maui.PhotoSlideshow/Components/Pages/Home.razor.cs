@@ -1,5 +1,6 @@
 ﻿using Blazor.Maui.PhotoSlideshow.Services;
 using Microsoft.AspNetCore.Components;
+using Microsoft.JSInterop;
 using Blazor.Maui.PhotoSlideshow.Models;
 
 namespace Blazor.Maui.PhotoSlideshow.Components.Pages;
@@ -9,6 +10,7 @@ public partial class Home : IDisposable
     [Inject] private SlideshowService SlideshowService { get; set; } = default!;
     [Inject] private ImageCacheService ImageCacheService { get; set; } = default!;
     [Inject] private ImageConverterService ImageConverter { get; set; } = default!;
+    [Inject] private IJSRuntime JSRuntime { get; set; } = default!;
 
     private bool _isRunning = false;
     private bool _showSettings = false;
@@ -29,6 +31,9 @@ public partial class Home : IDisposable
 
         SlideshowService.OnImagesChanged += OnImagesChanged;
         SlideshowService.OnFullScreenChanged += OnFullScreenChanged;
+        
+        // Configurer le callback pour obtenir l'index central via JavaScript
+        SlideshowService.GetCenterImageIndexCallback = GetCenterImageIndexFromJsAsync;
 
         await SlideshowService.InitializeAsync();
         UpdateImageSnapshot();
@@ -252,11 +257,29 @@ public partial class Home : IDisposable
         StateHasChanged();
     }
 
+    /// <summary>
+    /// Obtient l'index de l'image au centre de l'écran via JavaScript
+    /// </summary>
+    private async Task<int> GetCenterImageIndexFromJsAsync()
+    {
+        try
+        {
+            var index = await JSRuntime.InvokeAsync<int>("slideshowInterop.getCenterImageIndex");
+            return index;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Erreur JS getCenterImageIndex: {ex.Message}");
+            return -1;
+        }
+    }
+
     public void Dispose()
     {
         _isDisposed = true;
         SlideshowService.OnImagesChanged -= OnImagesChanged;
         SlideshowService.OnFullScreenChanged -= OnFullScreenChanged;
+        SlideshowService.GetCenterImageIndexCallback = null; // Nettoyer le callback
         SlideshowService.StopAnimation();
         _imageSourceCache.Clear();
         _fullscreenImageBase64 = null;

@@ -11,4 +11,5 @@ public class ImageItem
     public double Rotation { get; set; }
     public double Opacity { get; set; } = 1.0;
     public bool IsFullScreen { get; set; }
+    public bool HasBeenFullscreen { get; set; } // Marque si l'image a déjà été affichée en plein écran
 }

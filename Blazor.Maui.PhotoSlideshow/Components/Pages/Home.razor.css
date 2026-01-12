@@ -19,7 +19,12 @@
 }
 
     .mosaic-grid.animated {
-        animation: panGrid 120s infinite linear;
+        animation: panGrid 50s infinite linear;
+        animation-play-state: running;
+    }
+
+    .mosaic-grid.animated.paused {
+        animation-play-state: paused;
     }
 
 @keyframes panGrid {

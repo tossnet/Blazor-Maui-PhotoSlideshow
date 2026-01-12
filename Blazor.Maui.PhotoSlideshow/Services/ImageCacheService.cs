@@ -120,7 +120,11 @@ public class ImageCacheService
             {
                 Console.WriteLine($"Cache chargé: {cachedData.Images.Count} images");
 
-                foreach (var image in cachedData.Images)
+                // Mélanger les images pour un ordre aléatoire à chaque lancement
+                var random = new Random();
+                var shuffledImages = cachedData.Images.OrderBy(_ => random.Next()).ToList();
+
+                foreach (var image in shuffledImages)
                 {
                     _discoveredImages.Add(image);
                 }
@@ -392,6 +396,31 @@ public class ImageCacheService
         var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(networkPath));
         var hashString = BitConverter.ToString(hash).Replace("-", "").ToLower();
         return $"{hashString}{suffix}{Path.GetExtension(networkPath)}";
+    }
+
+    /// <summary>
+    /// Récupère les miniatures déjà en cache pour un affichage immédiat au démarrage
+    /// </summary>
+    public List<string> GetCachedThumbnails(int maxCount = 50)
+    {
+        try
+        {
+            if (!Directory.Exists(_thumbnailsFolder))
+                return new List<string>();
+
+            var thumbnails = Directory.GetFiles(_thumbnailsFolder, "*_thumb.*")
+                .OrderBy(_ => Random.Shared.Next())
+                .Take(maxCount)
+                .ToList();
+
+            Console.WriteLine($"📦 {thumbnails.Count} miniatures en cache trouvées");
+            return thumbnails;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur lecture cache miniatures: {ex.Message}");
+            return new List<string>();
+        }
     }
 
     public void ClearCache()

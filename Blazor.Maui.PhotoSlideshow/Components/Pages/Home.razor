@@ -4,7 +4,7 @@
 <div class="slideshow-container">
     @if (_currentImages.Any())
     {
-        <div class="mosaic-grid @(SlideshowService.IsAnimationRunning ? "animated" : "")">
+        <div class="mosaic-grid @(SlideshowService.IsAnimationRunning ? "animated" : "") @(SlideshowService.IsAnimationPaused ? "paused" : "")">
             @foreach (var image in _currentImages)
             {
                 @if (!string.IsNullOrEmpty(image.CachedPath) && !image.IsFullScreen)
@@ -62,7 +62,7 @@
         {
             <p>✓ @SlideshowService.TotalImages images chargées</p>
         }
-        @* NOUVEAU: Afficher les stats du cache *@
+        @* Afficher les stats du cache *@
         <p style="font-size: 0.8em; opacity: 0.7;">Cache: @_cacheStats.count images (@_cacheStats.pending en cours)</p>
     </div>
 </div>
